@@ -26,9 +26,14 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_FAIL_BIT      BIT1
 
 static const char *TAG = "MAIN_APP";
+bool isrecording = false;
+int framenum = 0;
+
 
 // we are using ESP32-S3-WROOM-1-N8R8 with 8MiB Flash Storage and 8MiB PSRAM
 // update pin numbers later
+
+#define GPIO_TRIG_BTN 1
 
 #define CAM_PIN_D0 1
 #define CAM_PIN_D1 1
@@ -232,8 +237,32 @@ esp_err_t rootpage(httpd_req_t *req){
 
 }
 
+esp_err_t recording_function(){
+    if(isrecording){
+        char filename[32];
+        snprintf(filename, 32, "/sdcard/petimg_%d.jpg", framenum);
+
+        FILE *openfile = fopen(filename, "w");
+        fwrite(fb->buf, 1, fb->len, openfile);
+        fclose(openfile);
+    }
+}
+
+static void IRAM_ATTR btn_handler(void){isrecording = !isrecording;}
+
+
 void app_main(void)
 {
+    gpio_config_t btn = {
+        .intr_type = GPIO_INTR_HIGH_LEVEL,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,
+        .pull_down_en = 0,
+        .pin_bit_mask = GPIO_TRIG_BTN
+    };
+    gpio_config(&btn);
+    
+
     espcam_init(&cam_conf);
     sd_card_init();
 
@@ -266,6 +295,6 @@ void app_main(void)
         httpd_register_uri_handler(&handle, &root_uri);
         ESP_LOGI(TAG, "Web server is running, along with the root site");
     }
-
+    recording_function();
     
 }
