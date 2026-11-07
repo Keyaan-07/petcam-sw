@@ -3,6 +3,7 @@
 #include "esp_camera.h"
 #include "sdmmc_cmd.h" 
 #include "driver/sdmmc_host.h"
+#include "esp_vfs_fat.h"
 
 // we are using ESP32-S3-WROOM-1-N8R8 with 8MiB Flash Storage and 8MiB PSRAM
 // update pin numbers later
@@ -86,7 +87,8 @@ esp_err_t espcam_init(const camera_config_t *config){
     return ESP_OK;
 }
 
-sdmmc_host_t sd_card_init(){
+esp_err_t sd_card_init(){
+    sdmmc_card_t sdcard;
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     sdmmc_slot_config_t slot_conf = SDMMC_SLOT_CONFIG_DEFAULT();
     slot_conf.width = 4;
@@ -96,10 +98,29 @@ sdmmc_host_t sd_card_init(){
     slot_conf.d1 = SD_D1;
     slot_conf.d2 = SD_D2;
     slot_conf.d3 = SD_D3;
+
+    esp_vfs_fat_mount_config_t mount_conf = {
+        .max_files = 10,
+        .allocation_unit_size = 16*1024,
+        .format_if_mount_failed = false,
+        .disk_status_check_enable = false,
+        .use_one_fat = false
+    };
+    // esp_vfs_fat_conf_t fat_conf = {
+    //     .base_path = "/sdcard",
+    //     .fat_drive = "C",
+    //     .max_files = 10
+    // };
+    esp_err_t mount = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_conf, &mount_conf, &sdcard);
+    if(mount != ESP_OK){
+        return mount;
+    }
+
+    return ESP_OK;
 }
 
 void app_main(void)
 {
     espcam_init(&cam_conf);
-
+    sd_card_init();
 }
