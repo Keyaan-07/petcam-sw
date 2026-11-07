@@ -10,6 +10,7 @@
 #include "esp_event.h"
 #include "lwip/sys.h"
 #include "lwip/err.h"
+#include "esp_http_server.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -137,7 +138,7 @@ esp_err_t sd_card_init(){
 
     return ESP_OK;
 }
-// event handler code directly taken from the ESP-IDF library
+// event handler code directly taken from the ESP-IDF library.
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
 {
@@ -162,12 +163,13 @@ static void event_handler(void* arg, esp_event_base_t event_base,
 
 // wifi initialisation example taken from the esp-idf example because i am relatively new to esp-32
 void wifi_init_sta(){
+    s_wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t conf = WIFI_INIT_CONFIG_DEFAULT();
-    EWSP_ERROR_CHECK(esp_wifi_init(&conf));
+    ESP_ERROR_CHECK(esp_wifi_init(&conf));
     
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
@@ -183,6 +185,53 @@ void wifi_init_sta(){
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
+esp_err_t start_cam_feed(httpd_req_t *req){
+    esp_err_t errvar = ESP_OK;
+    httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=123reqendshere4567890");
+    
+    while(1){
+        camera_fb_t *fb = esp_camera_fb_get();
+        if(fb == NULL){
+            ESP_LOGE(TAG, "Error, cannot get frame from the cam");
+            errvar = ESP_FAIL;
+            break;
+        }
+
+        char headerstr[128];
+        size_t headerlen = snprintf(headerstr, sizeof(headerstr), "Content-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", fb->len);
+        errvar = httpd_resp_send_chunk(req, headerstr, headerlen);
+        if(errvar != ESP_OK) {
+            esp_camera_fb_return(fb);
+            break;
+        }
+
+        errvar = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+        if (errvar != ESP_OK){
+            esp_camera_fb_return(fb);
+            break;
+        }
+
+        const char *boundarystr = "\r\n--123reqendshere4567890\r\n";
+        errvar = httpd_resp_send_chunk(req, boundarystr, strlen(boundarystr));
+        if(errvar != ESP_OK){
+            esp_camera_fb_return(fb);
+            break;
+        }
+    }
+    esp_camera_fb_return(fb);
+    return errvar;
+}
+
+esp_err_t rootpage(httpd_req_t *req){
+    httpd_resp_set_type(req, "text/html");
+
+    extern const uint8_t index_html_start[] asm("_binary_index_html_start");
+    extern const uint8_t index_html_end[] asm("_binary_index_html_end");
+    const size_t html_size = index_html_end-index_html_start;
+    return httpd_resp_send(req, (const char *)index_html_start, html_size);
+
+}
+
 void app_main(void)
 {
     espcam_init(&cam_conf);
@@ -195,5 +244,28 @@ void app_main(void)
         nvsinit = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvsinit);
-    wifi_init_sta();
+    wifi_init_sta(); 
+    
+    httpd_handle_t handle = NULL;
+    httpd_config_t http_conf = HTTPD_DEFAULT_CONFIG();
+    esp_err_t httperr = httpd_start(handle,  &http_conf);
+    if(httperr == ESP_OK){
+        httpd_uri_t stream_uri = {
+            .uri = "/stream",
+            .method = HTTP_GET,
+            .handler = start_cam_feed,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(&handle, &stream_uri);
+        httpd_uri_t root_uri = {
+            .uri = "/",
+            .method = HTTP_GET,
+            .handler = rootpage,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(&handle, &root_uri);
+        ESP_LOGI(TAG, "Web server is running, along with the root site");
+    }
+
+    
 }
