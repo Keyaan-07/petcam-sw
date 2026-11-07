@@ -1,19 +1,15 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_camera.h"
-#include "sdmmc_cmd.h" 
 #include "driver/sdmmc_host.h"
 #include "esp_vfs_fat.h"
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_event.h"
-#include "lwip/sys.h"
-#include "lwip/err.h"
 #include "esp_http_server.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "nvs.h"
 
 // Enter actual Wi-Fi details
 #define ESP_WIFI_SSID "YourSSIDHere"
@@ -28,12 +24,14 @@ static EventGroupHandle_t s_wifi_event_group;
 static const char *TAG = "MAIN_APP";
 bool isrecording = false;
 int framenum = 0;
+int needs_tobe_saved = false;
 
 
 // we are using ESP32-S3-WROOM-1-N8R8 with 8MiB Flash Storage and 8MiB PSRAM
 // update pin numbers later
 
 #define GPIO_TRIG_BTN 1
+#define GPIO_LED_PIN 1
 
 #define CAM_PIN_D0 1
 #define CAM_PIN_D1 1
@@ -56,7 +54,6 @@ int framenum = 0;
 // these two pins aren't used, thus initialised as -1:
 #define CAM_PIN_RST -1
 #define CAM_PIN_PWDN -1
-
 
 // SD card pin connections: (to be updated)
 #define SD_D0 1
@@ -131,11 +128,7 @@ esp_err_t sd_card_init(){
         .disk_status_check_enable = false,
         .use_one_fat = false
     };
-    // esp_vfs_fat_conf_t fat_conf = {
-    //     .base_path = "/sdcard",
-    //     .fat_drive = "C",
-    //     .max_files = 10
-    // };
+
     esp_err_t mount = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_conf, &mount_conf, &sdcard);
     if(mount != ESP_OK){
         return mount;
@@ -215,6 +208,13 @@ esp_err_t start_cam_feed(httpd_req_t *req){
             esp_camera_fb_return(fb);
             break;
         }
+        if(isrecording){
+            char filename[32];
+            snprintf(filename, 32, "/sdcard/petimg_%d.jpg", framenum++);
+            FILE *openfile = fopen(filename, "w");
+            fwrite(fb->buf, 1, fb->len, openfile);
+            fclose(openfile);
+        }
 
         const char *boundarystr = "\r\n--123reqendshere4567890\r\n";
         errvar = httpd_resp_send_chunk(req, boundarystr, strlen(boundarystr));
@@ -222,8 +222,10 @@ esp_err_t start_cam_feed(httpd_req_t *req){
             esp_camera_fb_return(fb);
             break;
         }
+        
+        esp_camera_fb_return(fb);
     }
-    esp_camera_fb_return(fb);
+    
     return errvar;
 }
 
@@ -237,35 +239,41 @@ esp_err_t rootpage(httpd_req_t *req){
 
 }
 
-esp_err_t recording_function(){
-    if(isrecording){
-        char filename[32];
-        snprintf(filename, 32, "/sdcard/petimg_%d.jpg", framenum);
-
-        FILE *openfile = fopen(filename, "w");
-        fwrite(fb->buf, 1, fb->len, openfile);
-        fclose(openfile);
-    }
+static void IRAM_ATTR btn_handler(void* arg){
+    isrecording = !isrecording;
+    gpio_set_level(GPIO_LED_PIN, isrecording);
+    if(!isrecording) needs_tobe_saved = true;
 }
 
-static void IRAM_ATTR btn_handler(void){isrecording = !isrecording;}
+esp_err_t web_record_toggle(httpd_req_t *req){
+    isrecording = !isrecording;
+    gpio_set_level(GPIO_LED_PIN, isrecording);
+    if(!isrecording) needs_tobe_saved = true;
+    return httpd_resp_sendstr(req, "OK");
+}
 
+esp_err_t send_status(httpd_req_t *req){
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, isrecording?"Recording":"Not Recording");
+}
 
 void app_main(void)
 {
     gpio_config_t btn = {
-        .intr_type = GPIO_INTR_HIGH_LEVEL,
+        .intr_type = GPIO_INTR_NEGEDGE,
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = 1,
         .pull_down_en = 0,
-        .pin_bit_mask = GPIO_TRIG_BTN
+        .pin_bit_mask = (1ULL << GPIO_TRIG_BTN)
     };
     gpio_config(&btn);
-    
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(GPIO_TRIG_BTN, btn_handler, NULL);
+    gpio_reset_pin(GPIO_LED_PIN);
+    gpio_set_direction(GPIO_LED_PIN, GPIO_MODE_OUTPUT);
 
     espcam_init(&cam_conf);
     sd_card_init();
-
 
     esp_err_t nvsinit = nvs_flash_init();
     if(nvsinit != ESP_OK){
@@ -274,10 +282,15 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(nvsinit);
     wifi_init_sta(); 
+    nvs_handle_t nvshand;
+    nvs_open(NVS_DEFAULT_PART_NAME, NVS_READWRITE, &nvshand);
+    nvs_get_i32(nvshand, "framecount", &framenum);
+    nvs_close(nvshand);
+
     
     httpd_handle_t handle = NULL;
     httpd_config_t http_conf = HTTPD_DEFAULT_CONFIG();
-    esp_err_t httperr = httpd_start(handle,  &http_conf);
+    esp_err_t httperr = httpd_start(&handle,  &http_conf);
     if(httperr == ESP_OK){
         httpd_uri_t stream_uri = {
             .uri = "/stream",
@@ -285,16 +298,39 @@ void app_main(void)
             .handler = start_cam_feed,
             .user_ctx = NULL
         };
-        httpd_register_uri_handler(&handle, &stream_uri);
+        httpd_register_uri_handler(handle, &stream_uri);
         httpd_uri_t root_uri = {
             .uri = "/",
             .method = HTTP_GET,
             .handler = rootpage,
             .user_ctx = NULL
         };
-        httpd_register_uri_handler(&handle, &root_uri);
-        ESP_LOGI(TAG, "Web server is running, along with the root site");
+        httpd_register_uri_handler(handle, &root_uri);
+        httpd_uri_t api_record_uri = {
+            .uri = "/api/record",
+            .method = HTTP_GET,
+            .handler = web_record_toggle,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(handle, &api_record_uri);
+        httpd_uri_t api_status_uri = {
+            .uri = "/api/status",
+            .method = HTTP_GET,
+            .handler = send_status,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(handle, &api_status_uri);
+        ESP_LOGI(TAG, "Web server is running, along with the root site and the record API");
+    }    
+    while(1){
+        if(needs_tobe_saved == 1 && isrecording == 0){
+            nvs_handle_t nvshand;
+            nvs_open(NVS_DEFAULT_PART_NAME, NVS_READWRITE, &nvshand);
+            nvs_set_i32(nvshand, "framecount", framenum);
+            nvs_commit(nvshand);
+            nvs_close(nvshand);
+            needs_tobe_saved = 0;
+        }
+        vTaskDelay(100);
     }
-    recording_function();
-    
 }

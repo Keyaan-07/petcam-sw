@@ -1,8 +1,18 @@
 <html lang="en">
 <head>
     <title>ESP32 Petcam</title>
+    <script>
+        const para = document.getElementsByClassName('statClass')
+        function statusupdate(){
+            const response = fetch('/api/status');
+            para.textContent = response.text();
+        }
+        setInterval(statusupdate, 500);
+    </script>
 </head>
 <body>
     <img src="/stream">
+    <button onclick="fetch('/api/record')">Record!</button>
+    <p class="statClass">Not Recording</p>
 </body>
 </html>
