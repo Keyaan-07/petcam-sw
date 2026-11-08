@@ -22,9 +22,10 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_FAIL_BIT      BIT1
 
 static const char *TAG = "MAIN_APP";
-bool isrecording = false;
-int framenum = 0;
-int needs_tobe_saved = false;
+bool isrecording = 0;
+int32_t framenum = 0;
+int32_t videonum = 0;
+int needs_tobe_saved = 0;
 
 
 // we are using ESP32-S3-WROOM-1-N8R8 with 8MiB Flash Storage and 8MiB PSRAM
@@ -110,7 +111,7 @@ esp_err_t espcam_init(const camera_config_t *config){
 }
 
 esp_err_t sd_card_init(){
-    sdmmc_card_t sdcard;
+    
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     sdmmc_slot_config_t slot_conf = SDMMC_SLOT_CONFIG_DEFAULT();
     slot_conf.width = 4;
@@ -128,7 +129,8 @@ esp_err_t sd_card_init(){
         .disk_status_check_enable = false,
         .use_one_fat = false
     };
-
+    
+    sdmmc_card_t *sdcard;
     esp_err_t mount = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_conf, &mount_conf, &sdcard);
     if(mount != ESP_OK){
         return mount;
@@ -210,7 +212,7 @@ esp_err_t start_cam_feed(httpd_req_t *req){
         }
         if(isrecording){
             char filename[32];
-            snprintf(filename, 32, "/sdcard/petimg_%d.jpg", framenum++);
+            snprintf(filename, 32, "/sdcard/petimg_%ld.jpeg", framenum++);
             FILE *openfile = fopen(filename, "w");
             fwrite(fb->buf, 1, fb->len, openfile);
             fclose(openfile);
@@ -285,6 +287,7 @@ void app_main(void)
     nvs_handle_t nvshand;
     nvs_open(NVS_DEFAULT_PART_NAME, NVS_READWRITE, &nvshand);
     nvs_get_i32(nvshand, "framecount", &framenum);
+    nvs_get_i32(nvshand, "videocount", &videonum);
     nvs_close(nvshand);
 
     
@@ -324,9 +327,40 @@ void app_main(void)
     }    
     while(1){
         if(needs_tobe_saved == 1 && isrecording == 0){
+            char vidfilename[32];
+            snprintf(vidfilename, 32, "/sdcard/recording_%ld.mjpeg", videonum);
+            FILE *videofile = fopen(vidfilename, "w");
+            if(videofile != NULL){
+                for(int32_t i = 0; i< framenum ; i++){
+                    char imagefilename[32];
+                    snprintf(imagefilename, 32, "/sdcard/petimg_%ld.jpeg", i);
+                    FILE *imagefile = fopen(imagefilename, "r");
+
+                    if(imagefile != NULL){
+                        uint8_t buffer[1024];
+                        size_t bytes_read = 0;
+
+                        while ((bytes_read = fread(buffer, 1, 1024, imagefile)) > 0 ){
+                            fwrite(buffer, 1, bytes_read, videofile);
+                        }
+
+                        fclose(imagefile);
+                        unlink(imagefilename);
+
+                    }
+
+                }
+                fclose(videofile);
+                framenum = 0;
+                videonum++;
+            }
+
+
             nvs_handle_t nvshand;
             nvs_open(NVS_DEFAULT_PART_NAME, NVS_READWRITE, &nvshand);
             nvs_set_i32(nvshand, "framecount", framenum);
+            nvs_commit(nvshand);
+            nvs_set_i32(nvshand, "videocount", videonum);
             nvs_commit(nvshand);
             nvs_close(nvshand);
             needs_tobe_saved = 0;
